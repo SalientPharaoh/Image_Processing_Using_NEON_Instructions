@@ -3,7 +3,7 @@ from WTHE import *
 import cv2
 import os
 
-filename = "Plane.jpg"
+filename = "../images/Plane.jpg"
 
 # load the image
 image = cv2.imread(filename)

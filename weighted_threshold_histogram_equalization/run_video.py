@@ -6,7 +6,7 @@ cap = cv2.VideoCapture("assets/Arctic-Convoy-With-Giant-Mack-Trucks.mp4")
 
 # video without sound
 video_out_name = (
-    "assets/Arctic-Convoy-With-Giant-Mack-Trucks-imWeightedThresholdedheq.mp4"
+    "../images/Arctic-Convoy-With-Giant-Mack-Trucks-imWeightedThresholdedheq.mp4"
 )
 
 # Applying the same approach as image - frame by frame
