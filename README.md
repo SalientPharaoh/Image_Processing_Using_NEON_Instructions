@@ -1,2 +1,0 @@
-# MSRIT_24VI14MSRIT_NEON_implementation_of_mathematical_operations_for_image_processing
-SRIB-PRISM Program
