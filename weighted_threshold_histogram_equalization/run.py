@@ -3,7 +3,7 @@ from WTHE import *
 import cv2
 import os
 
-filename = "../images/Plane.jpg"
+filename = "../BM3D-Denoise/noise.png"
 
 # load the image
 image = cv2.imread(filename)
