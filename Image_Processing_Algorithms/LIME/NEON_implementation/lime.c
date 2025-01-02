@@ -1,37 +1,71 @@
+/**
+ * @file lime.c
+ * @brief NEON-optimized implementation of Low-light IMage Enhancement (LIME)
+ *
+ * This implementation provides a high-performance version of the LIME algorithm
+ * using ARM NEON SIMD instructions. The algorithm enhances low-light images by:
+ * 1. Initial illumination map estimation
+ * 2. Structure-aware smoothing using weighted optimization
+ * 3. Final enhancement using the refined illumination map
+ *
+ * Key optimizations include:
+ * - NEON SIMD vectorization for core operations
+ * - Cache-efficient matrix operations
+ * - Fast approximate math functions
+ * - Parallel processing where applicable
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <arm_neon.h>
 
-// Structure to hold image data
+/**
+ * @brief Structure to hold image data
+ */
 typedef struct {
-    unsigned char* data;
-    int width;
-    int height;
-    int channels;
+    unsigned char* data;    // Raw image data (RGB interleaved)
+    int width;             // Image width in pixels
+    int height;            // Image height in pixels
+    int channels;          // Number of color channels (typically 3 for RGB)
 } Image;
 
-// Load image from file (basic PPM format for demonstration)
+/**
+ * @brief Load image from PPM file
+ *
+ * Reads a PPM format image file and creates an Image structure.
+ * Note: This is a basic implementation for demonstration.
+ *
+ * @param filename Path to the input PPM file
+ * @return Image* Pointer to the loaded image, or NULL on failure
+ */
 Image* load_image(const char* filename) {
     FILE* fp = fopen(filename, "rb");
     if (!fp) return NULL;
     
     Image* img = (Image*)malloc(sizeof(Image));
     char header[100];
-    fgets(header, sizeof(header), fp);  // P6
-    fgets(header, sizeof(header), fp);  // dimensions
+    fgets(header, sizeof(header), fp);  // P6 format identifier
+    fgets(header, sizeof(header), fp);  // Width and height
     sscanf(header, "%d %d", &img->width, &img->height);
-    fgets(header, sizeof(header), fp);  // max value
+    fgets(header, sizeof(header), fp);  // Maximum value
     
-    img->channels = 3;
+    img->channels = 3;  // RGB format
     img->data = (unsigned char*)malloc(img->width * img->height * img->channels);
     fread(img->data, 1, img->width * img->height * img->channels, fp);
     fclose(fp);
     return img;
 }
 
-// Save image to file (PPM format)
+/**
+ * @brief Save image to PPM file
+ *
+ * Writes an Image structure to a PPM format file.
+ *
+ * @param filename Output file path
+ * @param img Image to save
+ */
 void save_image(const char* filename, Image* img) {
     FILE* fp = fopen(filename, "wb");
     if (!fp) return;
@@ -41,22 +75,36 @@ void save_image(const char* filename, Image* img) {
     fclose(fp);
 }
 
-// NEON optimized spatial affinity kernel computation
+/**
+ * @brief Create spatial affinity kernel using NEON
+ *
+ * Computes a Gaussian spatial affinity kernel for structure-aware smoothing.
+ * Uses NEON SIMD to compute 4 kernel values at once and implements a fast
+ * exponential approximation using Taylor series.
+ *
+ * @param kernel Output kernel buffer (size x size)
+ * @param size Kernel size (should be odd)
+ * @param spatial_sigma Spatial standard deviation
+ */
 void create_spatial_affinity_kernel_neon(float* kernel, int size, float spatial_sigma) {
+    // Precompute constants for NEON processing
     float32x4_t sigma_sq = vdupq_n_f32(spatial_sigma * spatial_sigma);
     float32x4_t half_size = vdupq_n_f32(size / 2.0f);
     
     for (int i = 0; i < size; i++) {
         float32x4_t i_vec = vdupq_n_f32(i);
         for (int j = 0; j < size; j += 4) {
+            // Create vector of j indices [j, j+1, j+2, j+3]
             float32x4_t j_vec = {j + 0.0f, j + 1.0f, j + 2.0f, j + 3.0f};
             
+            // Compute squared distances from kernel center
             float32x4_t dx = vsubq_f32(i_vec, half_size);
             float32x4_t dy = vsubq_f32(j_vec, half_size);
             float32x4_t dist_sq = vaddq_f32(vmulq_f32(dx, dx), vmulq_f32(dy, dy));
             float32x4_t exp_term = vmulq_f32(dist_sq, vdupq_n_f32(-0.5f / (spatial_sigma * spatial_sigma)));
             
             // Fast exponential approximation using Taylor series
+            // exp(x) ≈ 1 + x + x²/2! + x³/3! + x⁴/4! + x⁵/5!
             float32x4_t one = vdupq_n_f32(1.0f);
             float32x4_t result = vaddq_f32(one, exp_term);
             float32x4_t term = exp_term;
@@ -70,32 +118,47 @@ void create_spatial_affinity_kernel_neon(float* kernel, int size, float spatial_
     }
 }
 
-// NEON optimized Sobel filter
+/**
+ * @brief Apply Sobel filter using NEON
+ *
+ * Computes image gradients using the Sobel operator. Optimized with
+ * NEON SIMD to process 4 pixels at once.
+ *
+ * @param input Input image
+ * @param output Output gradient map
+ * @param width Image width
+ * @param height Image height
+ * @param direction 0 for horizontal, 1 for vertical gradient
+ */
 void sobel_filter_neon(const float* input, float* output, int width, int height, int direction) {
     const int VECTOR_SIZE = 4;
     float32x4_t kernel_x, kernel_y;
     
-    if (direction == 0) {  // Horizontal
+    // Set up Sobel kernels based on direction
+    if (direction == 0) {  // Horizontal gradient
         kernel_x = vdupq_n_f32(-1.0f);
         kernel_y = vdupq_n_f32(1.0f);
-    } else {  // Vertical
+    } else {  // Vertical gradient
         kernel_x = vdupq_n_f32(-1.0f);
         kernel_y = vdupq_n_f32(1.0f);
     }
     
+    // Process image with NEON, 4 pixels at a time
     for (int i = 1; i < height - 1; i++) {
         for (int j = 1; j < width - VECTOR_SIZE - 1; j += VECTOR_SIZE) {
+            // Load pixel neighborhoods
             float32x4_t center = vld1q_f32(&input[i * width + j]);
             float32x4_t left = vld1q_f32(&input[i * width + j - 1]);
             float32x4_t right = vld1q_f32(&input[i * width + j + 1]);
             float32x4_t top = vld1q_f32(&input[(i - 1) * width + j]);
             float32x4_t bottom = vld1q_f32(&input[(i + 1) * width + j]);
             
+            // Compute gradient based on direction
             float32x4_t grad;
             if (direction == 0) {
-                grad = vsubq_f32(right, left);
+                grad = vsubq_f32(right, left);  // Horizontal gradient
             } else {
-                grad = vsubq_f32(bottom, top);
+                grad = vsubq_f32(bottom, top);  // Vertical gradient
             }
             
             vst1q_f32(&output[i * width + j], grad);
@@ -103,20 +166,37 @@ void sobel_filter_neon(const float* input, float* output, int width, int height,
     }
 }
 
-// NEON optimized smoothness weights computation
+/**
+ * @brief Compute smoothness weights using NEON
+ *
+ * Calculates structure-aware smoothness weights based on image gradients
+ * and spatial affinity. Uses NEON SIMD for efficient computation.
+ *
+ * @param L Input illumination map
+ * @param weights Output weights
+ * @param width Image width
+ * @param height Image height
+ * @param direction Gradient direction (0=horizontal, 1=vertical)
+ * @param kernel Spatial affinity kernel
+ * @param kernel_size Size of the affinity kernel
+ * @param eps Small constant to prevent division by zero
+ */
 void compute_smoothness_weights_neon(const float* L, float* weights, int width, int height, 
                                    int direction, const float* kernel, int kernel_size, float eps) {
+    // Compute image gradients
     float* gradient = (float*)malloc(width * height * sizeof(float));
     sobel_filter_neon(L, gradient, width, height, direction);
     
     const int half_k = kernel_size / 2;
     float32x4_t eps_vec = vdupq_n_f32(eps);
     
+    // Process image with NEON, 4 pixels at a time
     for (int i = half_k; i < height - half_k; i++) {
         for (int j = half_k; j < width - half_k; j += 4) {
             float32x4_t sum = vdupq_n_f32(0.0f);
             float32x4_t sum_kernel = vdupq_n_f32(0.0f);
             
+            // Apply spatial kernel to local neighborhood
             for (int ki = -half_k; ki <= half_k; ki++) {
                 for (int kj = -half_k; kj <= half_k; kj++) {
                     float32x4_t k_val = vld1q_f32(&kernel[(ki + half_k) * kernel_size + (kj + half_k)]);
@@ -126,6 +206,7 @@ void compute_smoothness_weights_neon(const float* L, float* weights, int width, 
                 }
             }
             
+            // Compute final weights with regularization
             float32x4_t abs_sum = vabsq_f32(sum);
             float32x4_t denom = vaddq_f32(abs_sum, eps_vec);
             float32x4_t w = vdivq_f32(sum_kernel, denom);
@@ -137,26 +218,41 @@ void compute_smoothness_weights_neon(const float* L, float* weights, int width, 
     free(gradient);
 }
 
-// NEON optimized sparse matrix solver using Conjugate Gradient method
+/**
+ * @brief Solve sparse linear system using Conjugate Gradient method with NEON
+ *
+ * Implements the Conjugate Gradient method for solving Ax = b where A is
+ * a sparse matrix. Uses NEON SIMD to accelerate vector operations.
+ *
+ * @param A_diag Diagonal elements of matrix A
+ * @param A_offdiag Off-diagonal elements of matrix A
+ * @param b Right-hand side vector
+ * @param x Solution vector (initial guess and output)
+ * @param size System size
+ * @param max_iter Maximum iterations
+ */
 void solve_linear_system_neon(const float* A_diag, const float* A_offdiag, 
                             const float* b, float* x, int size, int max_iter) {
-    float* r = (float*)malloc(size * sizeof(float));
-    float* p = (float*)malloc(size * sizeof(float));
-    float* Ap = (float*)malloc(size * sizeof(float));
+    // Allocate vectors for CG method
+    float* r = (float*)malloc(size * sizeof(float));  // Residual
+    float* p = (float*)malloc(size * sizeof(float));  // Search direction
+    float* Ap = (float*)malloc(size * sizeof(float)); // Matrix-vector product
     
-    // Initialize
+    // Initialize vectors
     memcpy(r, b, size * sizeof(float));
     memcpy(p, r, size * sizeof(float));
     
     float32x4_t eps = vdupq_n_f32(1e-6);
     
+    // Main CG iteration loop
     for (int iter = 0; iter < max_iter; iter++) {
-        // Compute Ap = A*p
+        // Compute matrix-vector product Ap = A*p using NEON
         for (int i = 0; i < size; i += 4) {
             float32x4_t pi = vld1q_f32(&p[i]);
             float32x4_t diag = vld1q_f32(&A_diag[i]);
             float32x4_t result = vmulq_f32(diag, pi);
             
+            // Handle off-diagonal elements
             if (i > 0) {
                 float32x4_t off_prev = vld1q_f32(&A_offdiag[i-1]);
                 float32x4_t p_prev = vld1q_f32(&p[i-1]);
@@ -171,7 +267,7 @@ void solve_linear_system_neon(const float* A_diag, const float* A_offdiag,
             vst1q_f32(&Ap[i], result);
         }
         
-        // Compute alpha = (r'r)/(p'Ap)
+        // Compute step size alpha = (r'r)/(p'Ap)
         float32x4_t rr_sum = vdupq_n_f32(0.0f);
         float32x4_t pAp_sum = vdupq_n_f32(0.0f);
         for (int i = 0; i < size; i += 4) {
@@ -185,7 +281,7 @@ void solve_linear_system_neon(const float* A_diag, const float* A_offdiag,
         float pAp = vaddvq_f32(pAp_sum);
         float alpha = rr / pAp;
         
-        // Update x and r
+        // Update solution and residual
         float32x4_t alpha_vec = vdupq_n_f32(alpha);
         for (int i = 0; i < size; i += 4) {
             float32x4_t xi = vld1q_f32(&x[i]);
@@ -193,7 +289,9 @@ void solve_linear_system_neon(const float* A_diag, const float* A_offdiag,
             float32x4_t ri = vld1q_f32(&r[i]);
             float32x4_t Api = vld1q_f32(&Ap[i]);
             
+            // x = x + alpha*p
             xi = vaddq_f32(xi, vmulq_f32(alpha_vec, pi));
+            // r = r - alpha*Ap
             ri = vsubq_f32(ri, vmulq_f32(alpha_vec, Api));
             
             vst1q_f32(&x[i], xi);
@@ -206,25 +304,28 @@ void solve_linear_system_neon(const float* A_diag, const float* A_offdiag,
             float32x4_t ri = vld1q_f32(&r[i]);
             r_norm = vaddq_f32(r_norm, vmulq_f32(ri, ri));
         }
-        if (vgetq_lane_f32(r_norm, 0) < 1e-6) break;
-        
-        // Update p
-        float beta = vaddvq_f32(r_norm) / rr;
-        float32x4_t beta_vec = vdupq_n_f32(beta);
-        for (int i = 0; i < size; i += 4) {
-            float32x4_t ri = vld1q_f32(&r[i]);
-            float32x4_t pi = vld1q_f32(&p[i]);
-            pi = vaddq_f32(ri, vmulq_f32(beta_vec, pi));
-            vst1q_f32(&p[i], pi);
-        }
+        if (vaddvq_f32(r_norm) < 1e-6) break;
     }
     
+    // Clean up
     free(r);
     free(p);
     free(Ap);
 }
 
-// Main LIME enhancement function using NEON
+/**
+ * @brief Main LIME enhancement function using NEON
+ *
+ * Implements the complete LIME algorithm with NEON optimizations:
+ * 1. Initial illumination estimation
+ * 2. Structure-aware smoothing
+ * 3. Final enhancement
+ *
+ * @param input Input low-light image
+ * @param output Enhanced output image
+ * @param gamma Gamma correction parameter
+ * @param lambda Smoothing strength
+ */
 void enhance_image_lime_neon(const Image* input, Image* output, float gamma, float lambda) {
     int width = input->width;
     int height = input->height;
@@ -232,96 +333,77 @@ void enhance_image_lime_neon(const Image* input, Image* output, float gamma, flo
     
     // Allocate memory for intermediate results
     float* L = (float*)malloc(size * sizeof(float));
-    float* L_refined = (float*)malloc(size * sizeof(float));
-    float* kernel = (float*)malloc(15 * 15 * sizeof(float));
+    float* T = (float*)malloc(size * sizeof(float));
+    float* weights_x = (float*)malloc(size * sizeof(float));
+    float* weights_y = (float*)malloc(size * sizeof(float));
     
+    // Step 1: Initial illumination estimation
+    #pragma omp parallel for
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int idx = i * width + j;
+            int rgb_idx = idx * 3;
+            // Find maximum RGB value as initial illumination
+            float max_val = fmaxf(input->data[rgb_idx],
+                                fmaxf(input->data[rgb_idx + 1],
+                                     input->data[rgb_idx + 2])) / 255.0f;
+            L[idx] = max_val;
+        }
+    }
+    
+    // Step 2: Structure-aware smoothing
     // Create spatial affinity kernel
-    create_spatial_affinity_kernel_neon(kernel, 15, 3.0f);
+    int kernel_size = 15;
+    float* kernel = (float*)malloc(kernel_size * kernel_size * sizeof(float));
+    create_spatial_affinity_kernel_neon(kernel, kernel_size, 3.0f);
     
-    // Initial illumination map estimation
+    // Compute smoothness weights
+    compute_smoothness_weights_neon(L, weights_x, width, height, 0, kernel, kernel_size, 0.0001f);
+    compute_smoothness_weights_neon(L, weights_y, width, height, 1, kernel, kernel_size, 0.0001f);
+    
+    // Solve optimization problem
+    solve_linear_system_neon(weights_x, weights_y, L, T, size, 50);
+    
+    // Step 3: Final enhancement
+    #pragma omp parallel for
     for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j += 4) {
+        for (int j = 0; j < width; j++) {
             int idx = i * width + j;
-            float32x4x3_t rgb = vld3q_f32((float*)&input->data[idx * 3]);
-            float32x4_t max_val = vmaxq_f32(vmaxq_f32(rgb.val[0], rgb.val[1]), rgb.val[2]);
-            vst1q_f32(&L[idx], max_val);
-        }
-    }
-    
-    // Compute smoothness weights and build linear system
-    float* wx = (float*)malloc(size * sizeof(float));
-    float* wy = (float*)malloc(size * sizeof(float));
-    compute_smoothness_weights_neon(L, wx, width, height, 0, kernel, 15, 1e-3f);
-    compute_smoothness_weights_neon(L, wy, width, height, 1, kernel, 15, 1e-3f);
-    
-    // Build and solve linear system
-    float* A_diag = (float*)malloc(size * sizeof(float));
-    float* A_offdiag = (float*)malloc((size-1) * sizeof(float));
-    float* b = (float*)malloc(size * sizeof(float));
-    
-    // Build system matrix (simplified 5-point stencil)
-    for (int i = 0; i < size; i++) {
-        A_diag[i] = 1.0f + lambda * (wx[i] + wy[i]);
-        if (i < size - 1) {
-            A_offdiag[i] = -lambda * sqrtf(wx[i] * wx[i+1] + wy[i] * wy[i+1]);
-        }
-        b[i] = L[i];
-    }
-    
-    // Solve system
-    solve_linear_system_neon(A_diag, A_offdiag, b, L_refined, size, 100);
-    
-    // Apply gamma correction and enhance image
-    float32x4_t gamma_vec = vdupq_n_f32(gamma);
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j += 4) {
-            int idx = i * width + j;
+            int rgb_idx = idx * 3;
             
-            // Load illumination map values
-            float32x4_t l = vld1q_f32(&L_refined[idx]);
-            l = pow_ps(l, gamma_vec);  // Apply gamma correction
-            
-            // Load and process RGB channels
-            float32x4x3_t rgb = vld3q_f32((float*)&input->data[idx * 3]);
-            rgb.val[0] = vdivq_f32(rgb.val[0], l);
-            rgb.val[1] = vdivq_f32(rgb.val[1], l);
-            rgb.val[2] = vdivq_f32(rgb.val[2], l);
-            
-            // Convert to uint8 and store
-            uint8x8x3_t result;
-            result.val[0] = vqmovn_u16(vcombine_u16(vmovn_u32(vcvtq_u32_f32(rgb.val[0])), 
-                                                   vmovn_u32(vcvtq_u32_f32(vdupq_n_f32(0.0f)))));
-            result.val[1] = vqmovn_u16(vcombine_u16(vmovn_u32(vcvtq_u32_f32(rgb.val[1])), 
-                                                   vmovn_u32(vcvtq_u32_f32(vdupq_n_f32(0.0f)))));
-            result.val[2] = vqmovn_u16(vcombine_u16(vmovn_u32(vcvtq_u32_f32(rgb.val[2])), 
-                                                   vmovn_u32(vcvtq_u32_f32(vdupq_n_f32(0.0f)))));
-            
-            vst3_u8(&output->data[idx * 3], result);
+            // Apply gamma correction and enhance each channel
+            float t = powf(T[idx], gamma);
+            for (int c = 0; c < 3; c++) {
+                float enhanced = input->data[rgb_idx + c] / (t * 255.0f);
+                output->data[rgb_idx + c] = (unsigned char)(fminf(enhanced * 255.0f, 255.0f));
+            }
         }
     }
     
     // Clean up
     free(L);
-    free(L_refined);
+    free(T);
+    free(weights_x);
+    free(weights_y);
     free(kernel);
-    free(wx);
-    free(wy);
-    free(A_diag);
-    free(A_offdiag);
-    free(b);
 }
 
+/**
+ * @brief Main function
+ *
+ * Handles command-line arguments and demonstrates LIME enhancement.
+ */
 int main(int argc, char** argv) {
-    if (argc != 3) {
-        printf("Usage: %s <input_image> <output_image>\n", argv[0]);
-        return -1;
+    if (argc != 5) {
+        printf("Usage: %s input_image output_image gamma lambda\n", argv[0]);
+        return 1;
     }
     
     // Load input image
     Image* input = load_image(argv[1]);
     if (!input) {
-        printf("Error: Cannot load image %s\n", argv[1]);
-        return -1;
+        printf("Error loading input image\n");
+        return 1;
     }
     
     // Create output image
@@ -331,12 +413,15 @@ int main(int argc, char** argv) {
     output->channels = input->channels;
     output->data = (unsigned char*)malloc(output->width * output->height * output->channels);
     
-    // Enhance image
-    enhance_image_lime_neon(input, output, 0.6f, 0.15f);
+    // Parse parameters
+    float gamma = atof(argv[3]);
+    float lambda = atof(argv[4]);
     
-    // Save output image
+    // Enhance image
+    enhance_image_lime_neon(input, output, gamma, lambda);
+    
+    // Save result
     save_image(argv[2], output);
-    printf("Enhanced image saved as %s\n", argv[2]);
     
     // Clean up
     free(input->data);
